@@ -8,11 +8,12 @@ snapshots, downloads their SBOMs using cosign, and uses Trivy + diffused-lib to
 analyze vulnerability differences.
 
 Usage:
+    python lib/sbomdiff.py --release release.json --previousRelease previous_release.json
     python lib/sbomdiff.py tenant --release release.json --previousRelease previous_release.json
     python lib/sbomdiff.py managed --release release.json --previousRelease previous_release.json
 
 Arguments:
-    mode                    Either 'tenant' or 'managed' (currently has no impact)
+    mode                    (Optional) Either 'tenant' or 'managed' (currently has no impact)
     --release, -r          Path to current release JSON file
     --previousRelease, -p  Path to previous release JSON file
 
@@ -56,6 +57,11 @@ Example:
     python lib/sbomdiff.py tenant \\
         --release /path/to/current-release.json \\
         --previousRelease /path/to/previous-release.json
+
+Exit Codes:
+    0 - Success: SBOM comparison completed successfully
+    1 - Expected error: Invalid input, missing files, or known failure conditions
+    2 - Unexpected error: Unhandled exception occurred (includes stack trace)
 """
 
 import argparse
@@ -64,6 +70,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from typing import Optional, Dict, Any, List, Tuple
 
 
 class ExternalCommands:
@@ -74,7 +81,7 @@ class ExternalCommands:
     to make the code testable by allowing these dependencies to be mocked.
     """
 
-    def run_kubectl(self, args):
+    def run_kubectl(self, args: List[str]) -> str:
         """
         Execute kubectl command.
 
@@ -92,7 +99,7 @@ class ExternalCommands:
         result = subprocess.run(cmd, check=True, capture_output=True, text=True)
         return result.stdout
 
-    def run_cosign(self, args):
+    def run_cosign(self, args: List[str]) -> str:
         """
         Execute cosign command.
 
@@ -110,7 +117,7 @@ class ExternalCommands:
         result = subprocess.run(cmd, check=True, capture_output=True, text=True)
         return result.stdout
 
-    def check_command_available(self, command, version_flag="--version"):
+    def check_command_available(self, command: str, version_flag: str = "--version") -> Tuple[bool, Optional[str]]:
         """
         Check if a command is available in PATH.
 
@@ -132,7 +139,7 @@ class ExternalCommands:
         except (subprocess.CalledProcessError, FileNotFoundError):
             return False, None
 
-    def run_pip_install(self, package):
+    def run_pip_install(self, package: str) -> str:
         """
         Install a Python package using pip.
 
@@ -151,7 +158,7 @@ class ExternalCommands:
         return result.stdout
 
 
-def log(message):
+def log(message: str) -> None:
     """
     Log a message to stderr.
 
@@ -161,7 +168,7 @@ def log(message):
     print(message, file=sys.stderr)
 
 
-def read_json(file):
+def read_json(file: str) -> Optional[Any]:
     """
     Read JSON data from a file.
 
@@ -182,7 +189,43 @@ def read_json(file):
     return None
 
 
-def get_snapshot_name(data_release):
+def validate_container_image(container_image: Any, component_name: str, context: str) -> Optional[Dict[str, str]]:
+    """
+    Validate a containerImage field and return error information if invalid.
+
+    Args:
+        container_image: The containerImage value to validate
+        component_name: Name of the component (for logging)
+        context: Context string (e.g., "current release", "previous release")
+
+    Returns:
+        dict or None: Error dict with status and reason if invalid, None if valid
+
+    Example:
+        >>> validate_container_image(None, "my-app", "current release")
+        {'status': 'error', 'reason': 'no containerImage in current release'}
+
+        >>> validate_container_image("registry/image:v1", "my-app", "current release")
+        None
+    """
+    if not container_image:
+        log(f"WARNING: No containerImage found for component {component_name} in {context}")
+        return {
+            "status": "error",
+            "reason": f"no containerImage in {context}"
+        }
+
+    if not isinstance(container_image, str) or not container_image.strip():
+        log(f"WARNING: Invalid containerImage for component {component_name} in {context}: {container_image}")
+        return {
+            "status": "error",
+            "reason": "invalid containerImage (must be non-empty string)"
+        }
+
+    return None
+
+
+def get_snapshot_name(data_release: Dict[str, Any]) -> str:
     """
     Extract the snapshot name from release data.
 
@@ -193,19 +236,29 @@ def get_snapshot_name(data_release):
         str: The snapshot name
 
     Raises:
-        ValueError: If 'spec' or 'snapshot' keys are missing
+        ValueError: If 'spec' or 'snapshot' keys are missing, or if values are invalid
     """
-    if "spec" in data_release:
-        spec = data_release["spec"]
-        if "snapshot" in spec:
-            return spec["snapshot"]
-        else:
-            raise ValueError(f"Missing 'snapshot' key in spec: {spec}")
-    else:
+    if "spec" not in data_release:
         raise ValueError(f"Missing 'spec' key in release data: {data_release}")
 
+    spec = data_release["spec"]
+    if not isinstance(spec, dict):
+        raise ValueError(f"'spec' must be a dictionary, got {type(spec).__name__}: {spec}")
 
-def get_snapshot_namespace(data_release):
+    if "snapshot" not in spec:
+        raise ValueError(f"Missing 'snapshot' key in spec: {spec}")
+
+    snapshot = spec["snapshot"]
+    if not isinstance(snapshot, str):
+        raise ValueError(f"'snapshot' must be a string, got {type(snapshot).__name__}: {snapshot}")
+
+    if not snapshot.strip():
+        raise ValueError(f"'snapshot' cannot be empty or whitespace: '{snapshot}'")
+
+    return snapshot
+
+
+def get_snapshot_namespace(data_release: Dict[str, Any]) -> str:
     """
     Extract the namespace from release data.
 
@@ -216,19 +269,29 @@ def get_snapshot_namespace(data_release):
         str: The namespace name
 
     Raises:
-        ValueError: If 'metadata' or 'namespace' keys are missing
+        ValueError: If 'metadata' or 'namespace' keys are missing, or if values are invalid
     """
-    if "metadata" in data_release:
-        metadata = data_release["metadata"]
-        if "namespace" in metadata:
-            return metadata["namespace"]
-        else:
-            raise ValueError(f"Missing 'namespace' key in metadata: {metadata}")
-    else:
+    if "metadata" not in data_release:
         raise ValueError(f"Missing 'metadata' key in release data: {data_release}")
 
+    metadata = data_release["metadata"]
+    if not isinstance(metadata, dict):
+        raise ValueError(f"'metadata' must be a dictionary, got {type(metadata).__name__}: {metadata}")
 
-def get_snapshot_data(namespace, snapshot, cmd_runner=None):
+    if "namespace" not in metadata:
+        raise ValueError(f"Missing 'namespace' key in metadata: {metadata}")
+
+    namespace = metadata["namespace"]
+    if not isinstance(namespace, str):
+        raise ValueError(f"'namespace' must be a string, got {type(namespace).__name__}: {namespace}")
+
+    if not namespace.strip():
+        raise ValueError(f"'namespace' cannot be empty or whitespace: '{namespace}'")
+
+    return namespace
+
+
+def get_snapshot_data(namespace: str, snapshot: str, cmd_runner: Optional[ExternalCommands] = None) -> Dict[str, Any]:
     """
     Retrieve snapshot data from Kubernetes using kubectl.
 
@@ -249,7 +312,7 @@ def get_snapshot_data(namespace, snapshot, cmd_runner=None):
 
     try:
         output = cmd_runner.run_kubectl(["get", "snapshot", snapshot, "-n", namespace, "-ojson"])
-        log(output)
+        log(f"Retrieved snapshot {snapshot} successfully ({len(output)} bytes)")
         return json.loads(output)
     except subprocess.CalledProcessError as e:
         log(f"kubectl command failed: {e}")
@@ -262,12 +325,13 @@ def get_snapshot_data(namespace, snapshot, cmd_runner=None):
         raise
 
 
-def install_trivy():
+def install_trivy() -> None:
     """
     Install Trivy binary from GitHub releases with SHA256 verification.
 
-    Downloads the appropriate Trivy binary for the current platform, verifies its
-    SHA256 checksum against known good values, and installs it to a directory in PATH.
+    Downloads the appropriate Trivy binary for the current platform, fetches the
+    official checksums file from GitHub releases, verifies the SHA256 checksum,
+    and installs it to a directory in PATH.
 
     Supported platforms:
         - Linux: x86_64, ARM64, ARM (32-bit)
@@ -311,22 +375,39 @@ def install_trivy():
         log(f"Unsupported operating system: {system}")
         raise RuntimeError(f"Unsupported operating system: {system}")
 
-    # Trivy version and SHA256 checksums
+    # Trivy version
     trivy_version = "0.67.2"
     filename = f"trivy_{trivy_version}_{os_name}-{arch}.tar.gz"
 
-    # SHA256 checksums for verification (from official release)
-    checksums = {
-        "trivy_0.67.2_Linux-64bit.tar.gz": "546511a5514afc813c0b72e4abeea2c16a32228a13a1e5114d927c190e76b1f9",
-        "trivy_0.67.2_Linux-ARM64.tar.gz": "e4f28390b06cdaaed94f8c49cce2c4c847938b5188aefdeb82453f2e933e57cb",
-        "trivy_0.67.2_macOS-64bit.tar.gz": "4a5b936a8d89b508ecdc6edd65933b6fe3e9a368796cbdf917fd0df393f26542",
-        "trivy_0.67.2_macOS-ARM64.tar.gz": "6b3163667f29fc608a2ed647c1bd42023af5779349286148190a168c5b3f28f1",
-    }
+    # Download and parse official checksums file
+    checksums_url = f"https://github.com/aquasecurity/trivy/releases/download/v{trivy_version}/trivy_{trivy_version}_checksums.txt"
+    log(f"Fetching official checksums from {checksums_url}")
+
+    try:
+        with urllib.request.urlopen(checksums_url) as response:
+            checksums_content = response.read().decode('utf-8')
+    except Exception as e:
+        log(f"Failed to fetch checksums file: {e}")
+        raise RuntimeError(f"Failed to fetch official checksums from {checksums_url}: {e}")
+
+    # Parse checksums file (format: "checksum  filename")
+    checksums = {}
+    for line in checksums_content.strip().split('\n'):
+        if line.strip():
+            parts = line.split()
+            if len(parts) >= 2:
+                checksum = parts[0]
+                # Filename might have spaces, so join remaining parts
+                file_name = ' '.join(parts[1:])
+                checksums[file_name] = checksum
 
     expected_checksum = checksums.get(filename)
     if not expected_checksum:
-        log(f"No checksum available for {filename}")
+        log(f"No checksum found for {filename} in official checksums file")
+        log(f"Available checksums: {list(checksums.keys())}")
         raise RuntimeError(f"No checksum available for {filename}")
+
+    log(f"Found checksum for {filename}: {expected_checksum}")
 
     url = f"https://github.com/aquasecurity/trivy/releases/download/v{trivy_version}/{filename}"
 
@@ -401,7 +482,7 @@ def install_trivy():
         raise
 
 
-def install_diffused_lib(cmd_runner=None):
+def install_diffused_lib(cmd_runner: Optional[ExternalCommands] = None) -> None:
     """
     Install diffused-lib package using pip with pinned version.
 
@@ -421,7 +502,7 @@ def install_diffused_lib(cmd_runner=None):
     log(f"Installing diffused-lib=={diffused_version}...")
     try:
         output = cmd_runner.run_pip_install(f"diffused-lib=={diffused_version}")
-        log(output)
+        log(f"diffused-lib=={diffused_version} installed successfully")
     except subprocess.CalledProcessError as e:
         log(f"Failed to install diffused-lib=={diffused_version}: {e.stderr}")
         raise
@@ -430,7 +511,7 @@ def install_diffused_lib(cmd_runner=None):
         raise
 
 
-def get_components_from_snapshot(namespace, snapshot_name, cmd_runner=None):
+def get_components_from_snapshot(namespace: str, snapshot_name: str, cmd_runner: Optional[ExternalCommands] = None) -> List[Dict[str, Any]]:
     """
     Retrieve the list of components from a Kubernetes snapshot.
 
@@ -458,7 +539,7 @@ def get_components_from_snapshot(namespace, snapshot_name, cmd_runner=None):
     return snapshot_data["spec"]["components"]
 
 
-def download_sbom_for_image(container_image, cmd_runner=None):
+def download_sbom_for_image(container_image: str, cmd_runner: Optional[ExternalCommands] = None) -> Optional[Dict[str, Any]]:
     """
     Download SBOM for a container image using cosign.
 
@@ -494,7 +575,7 @@ def download_sbom_for_image(container_image, cmd_runner=None):
         return None
 
 
-def ensure_trivy_installed(cmd_runner=None):
+def ensure_trivy_installed(cmd_runner: Optional[ExternalCommands] = None) -> bool:
     """
     Check if Trivy is installed, and install it if not found.
 
@@ -530,7 +611,7 @@ def ensure_trivy_installed(cmd_runner=None):
         return False
 
 
-def ensure_diffused_lib_installed(cmd_runner=None):
+def ensure_diffused_lib_installed(cmd_runner: Optional[ExternalCommands] = None) -> bool:
     """
     Check if diffused-lib is installed, and install it if not found.
 
@@ -545,7 +626,7 @@ def ensure_diffused_lib_installed(cmd_runner=None):
         If diffused-lib is not found, this will automatically install version 0.2.0 using pip
     """
     try:
-        import diffused.differ
+        import diffused.differ  # type: ignore[import-untyped]
         log("diffused-lib is already installed")
         return True
     except ImportError:
@@ -553,7 +634,7 @@ def ensure_diffused_lib_installed(cmd_runner=None):
         install_diffused_lib(cmd_runner)
         # Verify installation
         try:
-            import diffused.differ
+            import diffused.differ  # type: ignore[import-untyped]
             log("diffused-lib installed successfully")
             return True
         except ImportError:
@@ -561,7 +642,7 @@ def ensure_diffused_lib_installed(cmd_runner=None):
             return False
 
 
-def compare_component_sboms(component_name, sbom_current, sbom_previous):
+def compare_component_sboms(component_name: str, sbom_current: Dict[str, Any], sbom_previous: Dict[str, Any]) -> Dict[str, Any]:
     """
     Compare two SBOMs for a specific component using diffused-lib.
 
@@ -586,7 +667,7 @@ def compare_component_sboms(component_name, sbom_current, sbom_previous):
     Note:
         Creates temporary files to store SBOMs, which are automatically cleaned up
     """
-    from diffused.differ import VulnerabilityDiffer
+    from diffused.differ import VulnerabilityDiffer  # type: ignore[import-untyped]
 
     # Create a temporary directory to hold both SBOM files
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -630,7 +711,7 @@ def compare_component_sboms(component_name, sbom_current, sbom_previous):
         # Temporary directory and files are automatically cleaned up here
 
 
-def create_sbom_diff_record(component_diffs):
+def create_sbom_diff_record(component_diffs: Dict[str, Any]) -> Dict[str, Any]:
     """
     Create a standardized JSON record for SBOM diff results.
 
@@ -669,7 +750,7 @@ def create_sbom_diff_record(component_diffs):
     return result
 
 
-def compare_releases(cmd_runner=None):
+def compare_releases(cmd_runner: Optional[ExternalCommands] = None) -> Dict[str, Any]:
     """
     Main function to compare SBOMs between two releases.
 
@@ -727,6 +808,7 @@ def compare_releases(cmd_runner=None):
     parser = argparse.ArgumentParser(description='Compare SBOMs between releases using diffused-lib')
     parser.add_argument(
         "mode",
+        nargs='?',
         choices=["managed", "tenant"],
         help="Mode in which the script is called. It does not have any impact for this script."
     )
@@ -753,13 +835,25 @@ def compare_releases(cmd_runner=None):
 
     if not data_prev_release:
         log(f"INFO: Empty previous release file {args['previousRelease']} - this is the first release")
-        # Get components from current release and set them all as empty dicts
+        # Get components from current release and mark them all as new
         current_components = get_components_from_snapshot(snapshot_ns, snapshot_name, cmd_runner)
         component_diffs = {}
         for current_comp in current_components:
             comp_name = current_comp['name']
+            current_image = current_comp.get('containerImage')
             log(f"Component {comp_name} is new (first release)")
-            component_diffs[comp_name] = {}
+
+            # Validate containerImage
+            validation_error = validate_container_image(current_image, comp_name, "current release")
+            if validation_error:
+                component_diffs[comp_name] = validation_error
+            else:
+                # After validation passes, current_image is guaranteed to be a non-empty string
+                assert isinstance(current_image, str)
+                component_diffs[comp_name] = {
+                    "status": "new",
+                    "current_image": current_image
+                }
         return create_sbom_diff_record(component_diffs)
 
     snapshot_prev_name = get_snapshot_name(data_prev_release)
@@ -799,13 +893,14 @@ def compare_releases(cmd_runner=None):
         comp_name = current_comp['name']
         current_image = current_comp.get('containerImage')
 
-        if not current_image:
-            log(f"WARNING: No containerImage found for component {comp_name}")
-            component_diffs[comp_name] = {
-                "status": "error",
-                "reason": "no containerImage in current release"
-            }
+        # Validate current containerImage
+        validation_error = validate_container_image(current_image, comp_name, "current release")
+        if validation_error:
+            component_diffs[comp_name] = validation_error
             continue
+
+        # After validation passes, current_image is guaranteed to be a non-empty string
+        assert isinstance(current_image, str)
 
         log(f"Processing component: {comp_name}")
 
@@ -816,7 +911,7 @@ def compare_releases(cmd_runner=None):
             component_diffs[comp_name] = {
                 "status": "error",
                 "reason": "failed to download current SBOM",
-                "image": current_image
+                "current_image": current_image
             }
             continue
 
@@ -825,14 +920,17 @@ def compare_releases(cmd_runner=None):
         if previous_comp:
             previous_image = previous_comp.get('containerImage')
 
-            if not previous_image:
-                log(f"WARNING: No containerImage found for previous component {comp_name}")
-                component_diffs[comp_name] = {
-                    "status": "new",
-                    "reason": "no containerImage in previous release",
-                    "current_image": current_image
-                }
+            # Validate previous containerImage
+            validation_error = validate_container_image(previous_image, comp_name, "previous release")
+            if validation_error:
+                # Treat invalid previous image as a new component
+                validation_error["status"] = "new"
+                validation_error["current_image"] = current_image
+                component_diffs[comp_name] = validation_error
                 continue
+
+            # After validation passes, previous_image is guaranteed to be a non-empty string
+            assert isinstance(previous_image, str)
 
             # Download SBOM for previous component
             previous_sbom = download_sbom_for_image(previous_image, cmd_runner)
@@ -881,4 +979,6 @@ if __name__ == "__main__":
         exit(1)
     except Exception as e:
         log(f"UNEXPECTED ERROR: {e}")
-        raise
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        exit(2)
