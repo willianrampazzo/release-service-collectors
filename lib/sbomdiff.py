@@ -63,23 +63,12 @@ import sys
 import tempfile
 from typing import Optional, Dict, Any, List
 
+from diffused.differ import VulnerabilityDiffer  # type: ignore[import-untyped]
+
 
 def log(message: str) -> None:
     """Log a message to stderr."""
     print(message, file=sys.stderr)
-
-
-def _install_temp_dependencies():
-    """
-    Temporary function to install dependencies for local testing.
-    This will be removed once Trivy and diffused-lib are added to the container image.
-    """
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    installer_script = os.path.join(script_dir, "install_temp_deps.py")
-
-    if os.path.exists(installer_script):
-        log("Running temporary dependency installer...")
-        subprocess.run([sys.executable, installer_script], check=True)
 
 
 class ExternalCommands:
@@ -259,8 +248,6 @@ def compare_component_sboms(component_name: str, sbom_current: Dict[str, Any], s
 
     Creates temporary files to store SBOMs, which are automatically cleaned up.
     """
-    from diffused.differ import VulnerabilityDiffer  # type: ignore[import-untyped]
-
     with tempfile.TemporaryDirectory() as tmpdir:
         current_path = os.path.join(tmpdir, 'current_sbom.json')
         previous_path = os.path.join(tmpdir, 'previous_sbom.json')
@@ -413,9 +400,6 @@ def compare_releases(cmd_runner: Optional[ExternalCommands] = None) -> Dict[str,
     if cmd_runner is None:
         cmd_runner = ExternalCommands()
 
-    # Temporary: Install dependencies if not already installed
-    _install_temp_dependencies()
-
     parser = argparse.ArgumentParser(description='Compare SBOMs between releases using diffused-lib')
     parser.add_argument(
         "mode",
@@ -476,6 +460,10 @@ def compare_releases(cmd_runner: Optional[ExternalCommands] = None) -> Dict[str,
 
     log(f"Found {len(current_components)} components in current release")
     log(f"Found {len(previous_components)} components in previous release")
+
+    # Verify trivy is available
+    if not shutil.which("trivy"):
+        raise RuntimeError("Trivy is not available. Please ensure it is pre-installed in the container image.")
 
     # Compare SBOMs for each component
     component_diffs = {}
