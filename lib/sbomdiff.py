@@ -429,7 +429,7 @@ def compare_releases(cmd_runner: Optional[ExternalCommands] = None) -> Dict[str,
     snapshot_ns = get_snapshot_namespace(data_release)
 
     if not data_prev_release:
-        log(f"INFO: Empty previous release file {args.previousRelease} - this is the first release")
+        log(f"Empty previous release file {args.previousRelease} - this is the first release")
         # Get components from current release and mark them all as new
         current_components = get_components_from_snapshot(snapshot_ns, snapshot_name, cmd_runner)
         component_diffs = {}
@@ -480,6 +480,7 @@ if __name__ == "__main__":
     try:
         result = compare_releases()
         print(json.dumps(result))
+        log("Completed comparing SBOMs")
         exit(0)
     except (ValueError, FileNotFoundError, RuntimeError) as e:
         log(f"ERROR: {e}")
