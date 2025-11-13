@@ -140,7 +140,7 @@ def validate_container_image(container_image: Any, component_name: str, context:
     return None
 
 
-def _extract_nested_string(data: Dict[str, Any], *keys: str) -> str:
+def extract_nested_string(data: Dict[str, Any], *keys: str) -> str:
     """
     Extract and validate a nested string value from a dictionary.
 
@@ -179,12 +179,12 @@ def _extract_nested_string(data: Dict[str, Any], *keys: str) -> str:
 
 def get_snapshot_name(data_release: Dict[str, Any]) -> str:
     """Extract the snapshot name from release data."""
-    return _extract_nested_string(data_release, "spec", "snapshot")
+    return extract_nested_string(data_release, "spec", "snapshot")
 
 
 def get_snapshot_namespace(data_release: Dict[str, Any]) -> str:
     """Extract the namespace from release data."""
-    return _extract_nested_string(data_release, "metadata", "namespace")
+    return extract_nested_string(data_release, "metadata", "namespace")
 
 
 def get_snapshot_data(namespace: str, snapshot: str, cmd_runner: Optional[ExternalCommands] = None) -> Dict[str, Any]:
@@ -273,7 +273,7 @@ def compare_component_sboms(component_name: str, sbom_current: Dict[str, Any], s
         }
 
 
-def _process_component(
+def process_component(
     comp_name: str,
     current_comp: Dict[str, Any],
     previous_comp: Optional[Dict[str, Any]],
@@ -435,7 +435,7 @@ def compare_releases(cmd_runner: Optional[ExternalCommands] = None) -> Dict[str,
         component_diffs = {}
         for current_comp in current_components:
             comp_name = current_comp['name']
-            component_diffs[comp_name] = _process_component(comp_name, current_comp, None, cmd_runner)
+            component_diffs[comp_name] = process_component(comp_name, current_comp, None, cmd_runner)
         return {"releaseNotes": {"sbomDiff": component_diffs}}
 
     snapshot_prev_name = get_snapshot_name(data_prev_release)
@@ -471,7 +471,7 @@ def compare_releases(cmd_runner: Optional[ExternalCommands] = None) -> Dict[str,
     for current_comp in current_components:
         comp_name = current_comp['name']
         previous_comp = previous_components_map.get(comp_name)
-        component_diffs[comp_name] = _process_component(comp_name, current_comp, previous_comp, cmd_runner)
+        component_diffs[comp_name] = process_component(comp_name, current_comp, previous_comp, cmd_runner)
 
     return {"releaseNotes": {"sbomDiff": component_diffs}}
 
@@ -480,6 +480,7 @@ if __name__ == "__main__":
     try:
         result = compare_releases()
         print(json.dumps(result))
+        exit(0)
     except (ValueError, FileNotFoundError, RuntimeError) as e:
         log(f"ERROR: {e}")
         exit(1)
