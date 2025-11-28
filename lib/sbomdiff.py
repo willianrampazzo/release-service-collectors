@@ -2,10 +2,13 @@
 """
 SBOM Diff Collector for Release Service
 
-This script compares Software Bill of Materials (SBOMs) between consecutive releases
-to identify changes in vulnerabilities. It retrieves container images from Kubernetes
-snapshots, downloads their SBOMs using cosign, and uses Trivy + diffused-lib to
-analyze vulnerability differences.
+This script compares vulnerabilities between consecutive releases to identify
+removed vulnerabilities. It retrieves container images from Kubernetes snapshots
+and uses Trivy + diffused-lib to analyze vulnerability differences.
+
+Scan Modes (controlled by SCAN_TYPE constant):
+    - "image": Scans container images directly using Trivy (default)
+    - "sbom": Downloads SBOMs using cosign and scans them
 
 Usage:
     python lib/sbomdiff.py --release release.json --previousRelease previous_release.json
@@ -33,13 +36,13 @@ Output Format:
     }
 
 Status values:
-    - "compared": Successfully compared SBOMs between releases
+    - "compared": Successfully compared vulnerabilities between releases
     - "new": Component is new in this release (no previous version)
     - "error": Failed to process component (see "reason" field)
 
 Dependencies:
     - kubectl: Must be available in PATH and configured with cluster access
-    - cosign: Must be available in PATH for downloading SBOMs
+    - cosign: Must be available in PATH for downloading SBOMs (only in "sbom" mode)
     - trivy: Must be pre-installed in the container image
     - diffused-lib: Must be pre-installed in the container image
 
@@ -49,7 +52,7 @@ Example:
         --previousRelease /path/to/previous-release.json
 
 Exit Codes:
-    0 - Success: SBOM comparison completed successfully
+    0 - Success: Comparison completed successfully
     1 - Expected error: Invalid input, missing files, or known failure conditions
     2 - Unexpected error: Unhandled exception occurred (includes stack trace)
 """
@@ -64,6 +67,9 @@ import tempfile
 from typing import Optional, Dict, Any, List
 
 from diffused.differ import VulnerabilityDiffer  # type: ignore[import-untyped]
+
+# Scan type: "sbom" to download and scan SBOMs via cosign, "image" to scan images directly
+SCAN_TYPE = "image"
 
 
 def log(message: str) -> None:
@@ -273,6 +279,28 @@ def compare_component_sboms(component_name: str, sbom_current: Dict[str, Any], s
         }
 
 
+def compare_component_images(component_name: str, current_image: str, previous_image: str) -> Dict[str, Any]:
+    """
+    Compare two container images using diffused-lib to identify removed vulnerabilities.
+
+    Scans images directly without requiring pre-downloaded SBOMs.
+    """
+    log(f"Comparing images for component {component_name} using diffused-lib")
+
+    differ = VulnerabilityDiffer(
+        previous_image=previous_image,
+        next_image=current_image,
+        scanner='trivy'
+    )
+    differ.scan_images()
+    differ.diff_vulnerabilities()
+
+    return {
+        "vulnerabilities_removed": differ.vulnerabilities_diff,
+        "vulnerabilities_removed_details": differ.vulnerabilities_diff_all_info
+    }
+
+
 def process_component(
     comp_name: str,
     current_comp: Dict[str, Any],
@@ -293,56 +321,67 @@ def process_component(
 
     log(f"Processing component: {comp_name}")
 
-    # Download SBOM for current component
-    current_sbom = download_sbom_for_image(current_image, cmd_runner)
-    if not current_sbom:
-        log(f"WARNING: Could not download SBOM for current component {comp_name}")
-        return {
-            "status": "error",
-            "reason": "failed to download current SBOM",
-            "current_image": current_image
-        }
-
     # Handle new component (no previous version)
     if not previous_comp:
         log(f"Component {comp_name} is new in this release")
         return {"status": "new", "current_image": current_image}
 
-    # Validate and process previous component
+    # Validate previous component
     previous_image = previous_comp.get('containerImage')
     validation_error = validate_container_image(previous_image, comp_name, "previous release")
     if validation_error:
         # If previous image is invalid, treat component as new
         return {"status": "new", "current_image": current_image}
 
-    # Download SBOM for previous component
-    previous_sbom = download_sbom_for_image(previous_image, cmd_runner)
-    if not previous_sbom:
-        log(f"WARNING: Could not download SBOM for previous component {comp_name}")
-        return {
-            "status": "error",
-            "reason": "failed to download previous SBOM",
-            "current_image": current_image,
-            "previous_image": previous_image
-        }
+    # Branch based on scan type
+    diff_result = {}
+    if SCAN_TYPE == "image":
+        # Image mode: scan images directly
+        try:
+            diff_result = compare_component_images(comp_name, current_image, previous_image)
+        except Exception as e:
+            log(f"ERROR: Failed to compare images for component {comp_name}: {e}")
+            return {
+                "status": "error",
+                "reason": f"image comparison failed: {str(e)}"
+            }
+    else:
+        # SBOM mode: download SBOMs and compare
+        current_sbom = download_sbom_for_image(current_image, cmd_runner)
+        if not current_sbom:
+            log(f"WARNING: Could not download SBOM for current component {comp_name}")
+            return {
+                "status": "error",
+                "reason": "failed to download current SBOM",
+                "current_image": current_image,
+                "previous_image": previous_image
+            }
 
-    # Compare the two SBOMs
-    try:
-        diff_result = compare_component_sboms(comp_name, current_sbom, previous_sbom)
-        return {
-            **diff_result,
-            "status": "compared",
-            "current_image": current_image,
-            "previous_image": previous_image
-        }
-    except Exception as e:
-        log(f"ERROR: Failed to compare SBOMs for component {comp_name}: {e}")
-        return {
-            "status": "error",
-            "reason": f"comparison failed: {str(e)}",
-            "current_image": current_image,
-            "previous_image": previous_image
-        }
+        previous_sbom = download_sbom_for_image(previous_image, cmd_runner)
+        if not previous_sbom:
+            log(f"WARNING: Could not download SBOM for previous component {comp_name}")
+            return {
+                "status": "error",
+                "reason": "failed to download previous SBOM",
+                "current_image": current_image,
+                "previous_image": previous_image
+            }
+
+        try:
+            diff_result = compare_component_sboms(comp_name, current_sbom, previous_sbom)
+        except Exception as e:
+            log(f"ERROR: Failed to compare SBOMs for component {comp_name}: {e}")
+            return {
+                "status": "error",
+                "reason": f"comparison failed: {str(e)}"
+            }
+
+    return {
+        **diff_result,
+        "status": "compared",
+        "current_image": current_image,
+        "previous_image": previous_image
+    }
 
 
 def compare_releases(cmd_runner: Optional[ExternalCommands] = None) -> Dict[str, Any]:
@@ -480,7 +519,7 @@ if __name__ == "__main__":
     try:
         result = compare_releases()
         print(json.dumps(result))
-        log("Completed comparing SBOMs")
+        log("Completed comparing releases")
         exit(0)
     except (ValueError, FileNotFoundError, RuntimeError) as e:
         log(f"ERROR: {e}")
