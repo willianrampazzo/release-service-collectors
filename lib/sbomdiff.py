@@ -268,10 +268,9 @@ def compare_component_sboms(component_name: str, sbom_current: Dict[str, Any], s
         differ = VulnerabilityDiffer(
             previous_sbom=previous_path,
             next_sbom=current_path,
-            scanner='trivy'
+            scanner='trivy',
+            scan_type='sbom'
         )
-        # differ.scan_sboms()
-        # differ.diff_vulnerabilities()
 
         return differ.vulnerabilities_diff
 
@@ -290,10 +289,9 @@ def compare_component_images(component_name: str, current_image: str, previous_i
     differ = VulnerabilityDiffer(
         previous_image=previous_image,
         next_image=current_image,
-        scanner='trivy'
+        scanner='trivy',
+        scan_type='image'
     )
-    # differ.scan_images()
-    # differ.diff_vulnerabilities()
 
     return differ.vulnerabilities_diff
 
